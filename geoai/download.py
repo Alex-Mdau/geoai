@@ -21,34 +21,30 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def download_naip(
+def download_landsat(
     bbox: Tuple[float, float, float, float],
     output_dir: str,
-    year: Optional[int] = None,
+    dataset: str = "landsat_ot_c2_l2",
     max_items: int = 10,
     overwrite: bool = False,
     preview: bool = False,
     **kwargs: Any,
 ) -> List[str]:
-    """Download NAIP imagery from Planetary Computer based on a bounding box.
+    """Download Landsat imagery from NASA Earthdata based on a bounding box.
 
-    This function searches for NAIP (National Agriculture Imagery Program) imagery
-    from Microsoft's Planetary Computer that intersects with the specified bounding box.
-    It downloads the imagery and saves it as GeoTIFF files.
+    This function searches for Landsat imagery from NASA Earthdata that intersects
+    with the specified bounding box. It downloads the imagery and saves it as GeoTIFF files.
 
     Args:
         bbox: Bounding box in the format (min_lon, min_lat, max_lon, max_lat) in WGS84 coordinates.
         output_dir: Directory to save the downloaded imagery.
-        year: Specific year of NAIP imagery to download (e.g., 2020). If None, returns imagery from all available years.
+        dataset: Landsat dataset (e.g., "landsat_ot_c2_l2" for Collection 2 Level 2 data).
         max_items: Maximum number of items to download.
         overwrite: If True, overwrite existing files with the same name.
         preview: If True, display a preview of the downloaded imagery.
 
     Returns:
         List of downloaded file paths.
-
-    Raises:
-        Exception: If there is an error downloading or saving the imagery.
     """
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -56,83 +52,71 @@ def download_naip(
     # Create a geometry from the bounding box
     geometry = box(*bbox)
 
-    # Connect to Planetary Computer STAC API
-    catalog = Client.open("https://planetarycomputer.microsoft.com/api/stac/v1")
+    # Define API endpoint for USGS EarthExplorer
+    api_url = "https://earthexplorer.usgs.gov/inventory/json/v2/search/"
 
-    # Build query for NAIP data
+    # Build query for Landsat data
     search_params = {
-        "collections": ["naip"],
-        "intersects": geometry,
-        "limit": max_items,
+        "datasetName": dataset,
+        "spatialFilter": {
+            "filterType": "mbr",
+            "lowerLeft": {"longitude": bbox[0], "latitude": bbox[1]},
+            "upperRight": {"longitude": bbox[2], "latitude": bbox[3]},
+        },
+        "maxResults": max_items,
+        "startingNumber": 1,
     }
-
-    # Add year filter if specified
-    if year:
-        search_params["query"] = {"naip:year": {"eq": year}}
 
     for key, value in kwargs.items():
         search_params[key] = value
 
-    # Search for NAIP imagery
-    search_results = catalog.search(**search_params)
-    items = list(search_results.items())
-
-    if len(items) > max_items:
-        items = items[:max_items]
-
-    if not items:
-        print("No NAIP imagery found for the specified region and parameters.")
+    # Send request to USGS API
+    response = requests.post(api_url, json=search_params)
+    if response.status_code != 200:
+        print(f"Error fetching Landsat data: {response.text}")
         return []
 
-    print(f"Found {len(items)} NAIP items.")
+    results = response.json().get("data", {}).get("results", [])
+    if not results:
+        print("No Landsat imagery found for the specified region and parameters.")
+        return []
 
-    # Download and save each item
+    print(f"Found {len(results)} Landsat items.")
+
     downloaded_files = []
-    for i, item in enumerate(items):
-        # Sign the assets (required for Planetary Computer)
-        signed_item = pc.sign(item)
-
-        # Get the RGB asset URL
-        rgb_asset = signed_item.assets.get("image")
-        if not rgb_asset:
-            print(f"No RGB asset found for item {i+1}")
+    for i, item in enumerate(results):
+        download_url = item.get("displayId")  # Replace with actual download link field
+        if not download_url:
+            print(f"No download URL found for item {i+1}")
             continue
 
-        # Use the original filename from the asset
-        original_filename = os.path.basename(
-            rgb_asset.href.split("?")[0]
-        )  # Remove query parameters
-        output_path = os.path.join(output_dir, original_filename)
+        output_path = os.path.join(output_dir, f"{item['entityId']}.tif")
         if not overwrite and os.path.exists(output_path):
             print(f"Skipping existing file: {output_path}")
             downloaded_files.append(output_path)
             continue
 
-        print(f"Downloading item {i+1}/{len(items)}: {original_filename}")
+        print(f"Downloading item {i+1}/{len(results)}: {item['entityId']}")
 
         try:
-            # Open and save the data with progress bar
-            # For direct file download with progress bar
-            if rgb_asset.href.startswith("http"):
-                download_with_progress(rgb_asset.href, output_path)
-                #
-            else:
-                # Fallback to direct rioxarray opening (less common case)
-                data = rioxarray.open_rasterio(rgb_asset.href)
-                data.rio.to_raster(output_path)
-
+            # Download the file
+            with requests.get(download_url, stream=True) as r:
+                r.raise_for_status()
+                with open(output_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+            
             downloaded_files.append(output_path)
             print(f"Successfully saved to {output_path}")
 
             # Optional: Display a preview (uncomment if needed)
             if preview:
-                data = rioxarray.open_rasterio(output_path)
-                preview_raster(data)
-
+                print(f"Preview not implemented: {output_path}")
         except Exception as e:
             print(f"Error downloading item {i+1}: {str(e)}")
 
     return downloaded_files
+
 
 
 def download_with_progress(url: str, output_path: str) -> None:
